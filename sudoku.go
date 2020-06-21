@@ -21,12 +21,18 @@ type Grid struct {
 	grid    [][]int
 	choices [][]Choices // cache of choices at x,y
 
+	// The found values in each row, col and area
+	row  []uint
+	col  []uint
+	area []uint
+
 	nextChoice ChoicesHeap
 }
 
 func MakeGrid(grid [][]int) *Grid {
 	// TODO some kind of assertions as to each row having same cols
 	// TODO Setup the width/height correct
+	// TODO Check the original configuration has no invalid squares - This will break our row bit code.
 
 	// Defensively copy the grid, so we don't share the passed in slice.
 	g := &Grid{
@@ -40,7 +46,6 @@ func MakeGrid(grid [][]int) *Grid {
 type Choices struct {
 	choices uint // TODO Consider changing to uint16
 	x, y    int
-	valid   bool
 }
 
 // ChoicesHeap is a min-heap of Choices.
@@ -70,7 +75,29 @@ func (g *Grid) At(x, y int) int {
 	return g.grid[y][x]
 }
 
+func (g *Grid) updateFoundBits(x, y, value int) {
+
+	// Keep track of the found numbers per row/col/area
+	if g.grid[y][x] != 0 {
+		// Remove the old value
+		mask := uint(1) << (g.grid[y][x] - 1)
+		g.col[x] &^= mask
+		g.row[y] &^= mask
+		g.area[(y/3)*3+(x/3)] &^= mask
+	}
+
+	if value != 0 {
+		// Add new the value
+		mask := uint(1) << (value - 1)
+		g.col[x] |= mask
+		g.row[y] |= mask
+		g.area[(y/3)*3+(x/3)] |= mask
+	}
+}
+
 func (g *Grid) Set(x, y, value int) {
+	g.updateFoundBits(x, y, value)
+
 	g.grid[y][x] = value
 	g.invalidateChoices(x, y)
 }
@@ -93,6 +120,15 @@ func (g *Grid) Clone() *Grid {
 }
 
 func (g *Grid) init() {
+	g.row = make([]uint, g.width)
+	g.col = make([]uint, g.height)
+	g.area = make([]uint, g.width/3*g.height/3)
+
+	g.initChoices()
+	g.updateChoices()
+}
+
+func (g *Grid) initChoices() {
 	g.choices = make([][]Choices, len(g.grid))
 
 	for y := range g.choices {
@@ -105,33 +141,11 @@ func (g *Grid) init() {
 			// Add the squares which are missing a number
 			if g.grid[y][x] == 0 {
 				g.nextChoice = append(g.nextChoice, &g.choices[y][x])
+			} else {
+				g.updateFoundBits(x, y, g.grid[y][x])
 			}
 		}
 	}
-
-	g.updateChoices()
-}
-
-// Marks all choices on the same row/col and area as (x, y) as invalid.
-func (g *Grid) invalidateChoices(x, y int) {
-	// Row
-	for xx := 0; xx < g.width; xx++ {
-		g.choices[y][xx].valid = false
-	}
-
-	// Column
-	for yy := 0; yy < g.height; yy++ {
-		g.choices[yy][x].valid = false
-	}
-
-	// The area (3x3 grid)
-	for xx := x / 3 * 3; xx < x/3*3+3; xx++ {
-		for yy := y / 3 * 3; yy < y/3*3+3; yy++ {
-			g.choices[yy][xx].valid = false
-		}
-	}
-
-	g.updateChoices()
 }
 
 // updateChoices updates any invalid choices.
@@ -139,13 +153,34 @@ func (g *Grid) updateChoices() {
 	// Recalulate invalid choices
 	for y := 0; y < g.height; y++ {
 		for x := 0; x < g.width; x++ {
-			if !g.choices[y][x].valid {
-				g.choices[y][x].choices = g.choicesInternal(x, y)
-				g.choices[y][x].valid = true
-			}
+			g.choices[y][x].choices = g.choicesInternal(x, y)
 		}
 	}
 
+	heap.Init(&g.nextChoice)
+}
+
+// Marks all choices on the same row/col and area as (x, y) as invalid.
+func (g *Grid) invalidateChoices(x, y int) {
+	// Row
+	for xx := 0; xx < g.width; xx++ {
+		g.choices[y][xx].choices = g.choicesInternal(xx, y)
+	}
+
+	// Column
+	for yy := 0; yy < g.height; yy++ {
+		g.choices[yy][x].choices = g.choicesInternal(x, yy)
+	}
+
+	// The area (3x3 grid)
+	// TODO We could unroll this, or be smarter. We set the choices that were already set above
+	for xx := x / 3 * 3; xx < x/3*3+3; xx++ {
+		for yy := y / 3 * 3; yy < y/3*3+3; yy++ {
+			g.choices[yy][xx].choices = g.choicesInternal(xx, yy)
+		}
+	}
+
+	// Reshuffle the heap
 	heap.Init(&g.nextChoice)
 }
 
@@ -155,40 +190,17 @@ func (g *Grid) Choices(x, y int) uint {
 		return 0
 	}
 
-	assert(g.choices[y][x].valid, "returning an invalid choice")
 	return g.choices[y][x].choices
 }
 
 func (g *Grid) choicesInternal(x, y int) uint {
-
-	// TODO This could be greatly speed up by keeping track of a found
-	// per col/row/area. Then for each square we just OR them together
-
 	var found uint
+	found |= g.col[x]
+	found |= g.row[y]
+	found |= g.area[(y/3)*3+(x/3)]
 
-	// Check the row
-	for xx := 0; xx < g.width; xx++ {
-		found |= 1 << (g.grid[y][xx])
-	}
-
-	// Check the column
-	for yy := 0; yy < g.height; yy++ {
-		found |= 1 << (g.grid[yy][x])
-	}
-
-	// Check the area (3x3 grid)
-	// TODO Unroll this loop
-	for xx := x / 3 * 3; xx < x/3*3+3; xx++ {
-		for yy := y / 3 * 3; yy < y/3*3+3; yy++ {
-			found |= 1 << (g.grid[yy][xx])
-		}
-	}
-
-	// Shift the 0 (1st index) off the bottom, as that isn't a valid value in the puzzle.
-	// Negate the value (to be not founds)
-	// Then return the indexes.
-	return ^(found >> 1) & (1<<max - 1)
-
+	// Negate the value (to be not founds), and mask off the uneeded bits.
+	return (^found) & (1<<max - 1)
 }
 
 func (g *Grid) String() string {
