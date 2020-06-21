@@ -1,7 +1,9 @@
 package main
 
 import (
+	"container/heap"
 	"fmt"
+	"math/bits"
 	"strings"
 )
 
@@ -9,87 +11,147 @@ const width = 9
 const height = 9
 const max = 9
 
-//type Grid [][]int
-type Grid struct {
-	grid    [][]int
-	choices [][]uint // cache of choices at x,y
+func assert(condition bool, message string) {
+	if !condition {
+		panic(message)
+	}
 }
 
-func MakeGrid(grid [][]int) Grid {
+type Grid struct {
+	grid    [][]int
+	choices [][]*ChoicesHeapItem // cache of choices at x,y
+
+	nextChoice ChoicesHeap
+}
+
+func MakeGrid(grid [][]int) *Grid {
 	// TODO some kind of assertions as to each row having same cols
 
 	// Defensively copy the grid, so we don't share the passed in slice.
-	return Grid{
+	g := &Grid{
 		grid: grid,
-	}.Clone()
+	}
+	return g.Clone()
 }
 
-var grid = MakeGrid([][]int{
-	//0 1  2  3  4  5  6  7  8
-	{0, 9, 0, 0, 0, 0, 8, 5, 3}, // 0
-	{0, 0, 0, 8, 0, 0, 0, 0, 4}, // 1
-	{0, 0, 8, 2, 0, 3, 0, 6, 9}, // 2
-	{5, 7, 4, 0, 0, 2, 0, 0, 0}, // 3
-	{0, 0, 0, 0, 0, 0, 0, 0, 0}, // 4
-	{0, 0, 0, 9, 0, 0, 6, 3, 7}, // 5
-	{9, 4, 0, 1, 0, 8, 5, 0, 0}, // 6
-	{7, 0, 0, 0, 0, 6, 0, 0, 0}, // 7
-	{6, 8, 2, 0, 0, 0, 0, 9, 0}, // 8
-})
+type ChoicesHeapItem struct {
+	choices uint // TODO Consider changing to uint16
+	x, y    int
+	valid   bool
+}
 
-func (g Grid) At(x, y int) int {
+// ChoicesHeap is a min-heap of ChoicesHeapItem.
+type ChoicesHeap []*ChoicesHeapItem
+
+func (h ChoicesHeap) Len() int { return len(h) }
+func (h ChoicesHeap) Less(i, j int) bool {
+	return bits.OnesCount(h[i].choices) < bits.OnesCount(h[j].choices)
+}
+func (h ChoicesHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+func (h *ChoicesHeap) Push(x interface{}) {
+	// Push and Pop use pointer receivers because they modify
+	// the slice's length, not just its contents.
+	*h = append(*h, x.(*ChoicesHeapItem))
+}
+
+func (h *ChoicesHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
+}
+
+func (g *Grid) At(x, y int) int {
 	return g.grid[y][x]
 }
 
-func (g Grid) Set(x, y, value int) {
+func (g *Grid) Set(x, y, value int) {
 	g.grid[y][x] = value
-
-	//g.invalidCache(x, y)
+	g.invalidCache(x, y)
 }
 
-func (g Grid) invalidCache(x, y int) {
+func (g *Grid) invalidCache(x, y int) {
 	// Row
 	for xx := 0; xx < width; xx++ {
-		g.choices[y][xx] = 0
+		g.choices[y][xx].valid = false
 	}
 
 	// Column
 	for yy := 0; yy < height; yy++ {
-		g.choices[yy][x] = 0
+		g.choices[yy][x].valid = false
 	}
 
 	// The area (3x3 grid)
 	for xx := x / 3 * 3; xx < x/3*3+3; xx++ {
 		for yy := y / 3 * 3; yy < y/3*3+3; yy++ {
-			g.choices[yy][xx] = 0
+			g.choices[yy][xx].valid = false
 		}
 	}
+
+	g.initCache()
 }
 
-func (g Grid) Clone() Grid {
+func (g *Grid) init() {
+	g.choices = make([][]*ChoicesHeapItem, len(g.grid))
+
+	for y := range g.choices {
+		g.choices[y] = make([]*ChoicesHeapItem, len(g.grid[y]))
+
+		for x := range g.choices[y] {
+			g.choices[y][x] = &ChoicesHeapItem{
+				x: x,
+				y: y,
+			}
+
+			if g.grid[y][x] == 0 {
+				g.nextChoice = append(g.nextChoice, g.choices[y][x]) // TODO this could be a pointer to this slice entry
+			}
+		}
+	}
+
+	g.initCache()
+}
+
+func (g *Grid) initCache() {
+	// Recalulate invalid choices
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			if !g.choices[y][x].valid {
+				g.choices[y][x].choices = g.choicesInternal(x, y)
+				g.choices[y][x].valid = true
+			}
+		}
+	}
+
+	heap.Init(&g.nextChoice)
+}
+
+func (g *Grid) Clone() *Grid {
 	grid := make([][]int, len(g.grid))
-	choices := make([][]uint, len(g.grid))
 	for y := range grid {
 		grid[y] = make([]int, len(g.grid[y]))
-		choices[y] = make([]uint, len(g.grid[y]))
-
 		copy(grid[y], g.grid[y])
 	}
-	return Grid{
-		grid:    grid,
-		choices: choices,
+	cg := &Grid{
+		grid: grid,
 	}
+	cg.init()
+	return cg
 }
 
 // Choices returns the possible values that posititon x, y could be.
-func (g Grid) Choices(x, y int) uint {
+func (g *Grid) Choices(x, y int) uint {
 	if g.grid[y][x] != 0 {
 		return 0
 	}
-	//if g.choices[y][x] != 0 {
-	//	return g.choices[y][x]
-	//}
 
+	assert(g.choices[y][x].valid, "invalid choice")
+	return g.choices[y][x].choices
+}
+
+func (g *Grid) choicesInternal(x, y int) uint {
 	var found uint
 
 	// Check the row
@@ -113,11 +175,11 @@ func (g Grid) Choices(x, y int) uint {
 	// Shift the 0 (1st index) off the bottom, as that isn't a valid value in the puzzle.
 	// Negate the value (to be not founds)
 	// Then return the indexes.
-	g.choices[y][x] = ^(found >> 1) // TODO Mask off the higher bits
-	return g.choices[y][x]
+	return ^(found >> 1) & (1<<max - 1)
+
 }
 
-func (g Grid) String() string {
+func (g *Grid) String() string {
 	var s strings.Builder
 	for y := 0; y < len(g.grid); y++ {
 		s.WriteString("{")
@@ -133,61 +195,108 @@ func (g Grid) String() string {
 	return s.String()
 }
 
+func (g *Grid) Valid() bool {
+	// Check for unsolved spots
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			if g.grid[y][x] == 0 {
+				return false
+			}
+		}
+	}
+
+	// TODO Check each row is good
+	// TODO Check each col is good
+	// TODO Check each area is good
+
+	return true
+}
+
+// next returns the next x and y coordinate to look at. The next square must
+// not have already been solved. If there are no more, the returned y >= height.
+func (g *Grid) next() (int, int) {
+	// Jump to the square that isn't solved, and has least choices
+	if g.nextChoice.Len() == 0 {
+		// No valid choices left
+		return width, height
+	}
+
+	next := g.nextChoice[0]
+	return next.x, next.y
+}
+
+func (g *Grid) Pop() {
+	heap.Pop(&g.nextChoice)
+}
+
+func (g *Grid) Push(x, y int) {
+	g.nextChoice.Push(g.choices[y][x])
+	assert(len(g.nextChoice) < width*height, "too many next choices")
+}
+
 type SudokuSolver struct {
-	solutions []Grid // solutions
+	solutions []*Grid // solutions
+
+	Iterations int
 }
 
 // Simple backtrack solver
-func (s *SudokuSolver) Solve(grid Grid) []Grid {
-	s.solve(grid, 0, 0)
+func (s *SudokuSolver) Solve(grid *Grid) []*Grid {
+	s.Iterations = 0
+
+	x, y := grid.next()
+	s.solve(grid, x, y)
+
 	return s.solutions
 }
 
-func (s *SudokuSolver) solve(grid Grid, x, y int) {
+func (s *SudokuSolver) solve(grid *Grid, x, y int) {
+	s.Iterations++
+
 	if y >= height {
 		// found a solution!
 		s.solutions = append(s.solutions, grid.Clone())
-		return
+		return // Now backtrack to find more
 	}
 
-	nx, ny := s.next(x, y)
-	if grid.At(x, y) != 0 {
-		// Fixed value, move on
-		s.solve(grid, nx, ny)
-		return
-	}
+	assert(grid.At(x, y) == 0, "solving a grid that already has a value")
 
-	// Modify the grid on each choice, and revert it if we have to back trace
-	//for _, choice := range grid.Choices(x, y) {
 	choices := grid.Choices(x, y)
-	for i := 1; i <= max; i++ { // TODO I think there is a quicker way to find the index of all set bits
-		if choices&1 == 1 {
-			grid.Set(x, y, i)
-			s.solve(grid, nx, ny)
+	if choices > 0 {
+		grid.Pop()
+
+		for i := 1; i <= max; i++ { // TODO I think there is a quicker way to find the index of all set bits
+			if choices&1 == 1 {
+				grid.Set(x, y, i)
+
+				nx, ny := grid.next()
+				s.solve(grid, nx, ny)
+			}
+			choices >>= 1
 		}
-		choices >>= 1
+
+		grid.Set(x, y, 0)
+		grid.Push(x, y)
 	}
 
-	grid.Set(x, y, 0)
-
-	// No solution (back track)
+	// No solution (backtrack)
 	return
 }
-
-// next returns the next x and y coordinate to look at. If there are no more, the returned y >= height.
-func (s *SudokuSolver) next(x, y int) (int, int) {
-	nextX := x + 1
-	nextY := y
-
-	if nextX >= width {
-		nextX = 0
-		nextY++
-	}
-
-	return nextX, nextY
-}
-
 func main() {
+
+	var grid = MakeGrid([][]int{
+		//0 1  2  3  4  5  6  7  8
+		{0, 9, 0, 0, 0, 0, 8, 5, 3}, // 0
+		{0, 0, 0, 8, 0, 0, 0, 0, 4}, // 1
+		{0, 0, 8, 2, 0, 3, 0, 6, 9}, // 2
+		{5, 7, 4, 0, 0, 2, 0, 0, 0}, // 3
+		{0, 0, 0, 0, 0, 0, 0, 0, 0}, // 4
+		{0, 0, 0, 9, 0, 0, 6, 3, 7}, // 5
+		{9, 4, 0, 1, 0, 8, 5, 0, 0}, // 6
+		{7, 0, 0, 0, 0, 6, 0, 0, 0}, // 7
+		{6, 8, 2, 0, 0, 0, 0, 9, 0}, // 8
+	})
+
 	var sudoku SudokuSolver
 	solutions := sudoku.Solve(grid)
 
